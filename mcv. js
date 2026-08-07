@@ -1,0 +1,262 @@
+function main(config) {
+    const providerBase = {
+        type: "http",
+        format: "mrs",
+        interval: 604800
+    };
+    const domainBase = { ...providerBase, behavior: "domain" };
+    const ipcidrBase = { ...providerBase, behavior: "ipcidr" };
+
+    const override = {
+        "health-check": {
+            "enable": true,
+            "url": "https://www.gstatic.com/generate_204",
+            "interval": 86400
+        },
+        "dns": {
+            "enable": true,
+            "ipv6": true,
+            "use-hosts": true,
+            "cache-algorithm": "arc",
+            "use-system-hosts": true,
+            "edns-client-subnet": false,
+            "enhanced-mode": "fake-ip",
+            "fake-ip-range": "198.18.0.1/16",
+            "fake-ip-filter": [
+                "rule-set:private",
+                "rule-set:fakeip_filter"
+            ],
+            "proxy-server-nameserver": [
+                "https://dns.alidns.com/dns-query#中国流量",
+                "https://doh.pub/dns-query#中国流量"
+            ],
+            "default-nameserver": [
+                "223.5.5.5",
+                "119.29.29.29"
+            ],
+            "nameserver": [
+                "https://dns.cloudflare.com/dns-query#国外流量",
+                "https://dns.google/dns-query#国外流量"
+            ],
+            "nameserver-policy": {
+                "GEOIP:cn": [
+                    "https://dns.alidns.com/dns-query#中国流量",
+                    "https://doh.pub/dns-query#中国流量"
+                ]
+            },
+            "direct-nameserver": [
+                "223.5.5.5",
+                "119.29.29.29"
+            ]
+        },
+        "hosts": {
+            "dns.alidns.com": ["223.5.5.5", "223.6.6.6"],
+            "doh.pub": ["1.12.12.12", "120.53.53.53"],
+            "dns.cloudflare.com": ["1.1.1.1", "1.0.0.1"],
+            "dns.google": ["8.8.8.8", "8.8.4.4"],
+            "services.googleapis.cn": ["services.googleapis.com"],
+            "+.mcdn.bilivideo.com": ["0.0.0.0"],
+            "+.mcdn.bilivideo.cn": ["0.0.0.0"],
+            "+.edge.mountaintoys.cn": ["0.0.0.0"]
+        },
+        "ntp": {
+            "enable": true,
+            "write-to-system": false,
+            "server": "ntp.aliyun.com",
+            "port": 123,
+            "interval": 60
+        },
+        "tun": {
+            "enable": true,
+            "stack": "system",
+            "auto-route": true,
+            "strict-route": true,
+            "auto-redirect": true,
+            "auto-detect-interface": true,
+            "dns-hijack": [
+                "any:53",
+                "tcp://any:53"
+            ]
+        },
+        "proxy-groups": [
+            { "name": "🌍策略选择", "type": "select", "proxies": [] },
+            { "name": "云闪流量", "type": "select", "proxies": ["🌍策略选择"], "hidden": true },
+            { "name": "电报流量", "type": "select", "proxies": ["🌍策略选择"], "hidden": true },
+            { "name": "谷歌流量", "type": "select", "proxies": ["🌍策略选择"], "hidden": true },
+            { "name": "中国流量", "type": "select", "proxies": ["DIRECT"], "hidden": true },
+            { "name": "国外流量", "type": "select", "proxies": ["🌍策略选择"], "hidden": true },
+            { "name": "安全拦截", "type": "select", "proxies": ["REJECT"], "hidden": true }
+        ],
+        "rules": [
+            "GEOSITE,category-ads-all,安全拦截",
+            "DST-PORT,3478,安全拦截",
+            "DST-PORT,3479,安全拦截",
+            "DST-PORT,5349,安全拦截",
+            "DST-PORT,5350,安全拦截",
+            "DST-PORT,5351,安全拦截",
+            "DST-PORT,5766,安全拦截",
+            "DST-PORT,19302,安全拦截",
+            "DST-PORT,19305,安全拦截",
+            "DST-PORT,19307,安全拦截",
+            "DST-PORT,19308,安全拦截",
+            "DST-PORT,19309,安全拦截",
+            "DOMAIN-KEYWORD,stun,安全拦截",
+            "DOMAIN-KEYWORD,turn,安全拦截",
+            "RULE-SET,cloudflare-ip,云闪流量,no-resolve",
+            "RULE-SET,telegram-ip,电报流量,no-resolve",
+            "RULE-SET,google-ip,谷歌流量,no-resolve",
+            "RULE-SET,proxy_domain,国外流量",
+            "GEOIP,!CN,国外流量,no-resolve",
+            "RULE-SET,private,中国流量",
+            "RULE-SET,private-ip,中国流量,no-resolve",
+            "RULE-SET,fakeip_filter,中国流量",
+            "GEOIP,CN,中国流量,no-resolve",
+            "MATCH,🌍策略选择"
+        ],
+        "rule-providers": {
+            "fakeip_filter": { ...domainBase, "url": "https://fastly.jsdelivr.net/gh/wwqgtxx/clash-rules@release/fakeip-filter.mrs" },
+            "private-ip": { ...ipcidrBase, "url": "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geoip/private.mrs" },
+            "private": { ...domainBase, "url": "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/private.mrs" },
+            "proxy_domain": { ...domainBase, "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/mihomo-ruleset/proxy.mrs" },
+            "google-ip": { ...ipcidrBase, "url": "https://cdn.jsdelivr.net/gh/Loyalsoldier/geoip@release/mrs/google.mrs" },
+            "cloudflare-ip": { ...ipcidrBase, "url": "https://cdn.jsdelivr.net/gh/Loyalsoldier/geoip@release/mrs/cloudflare.mrs" },
+            "telegram-ip": { ...ipcidrBase, "url": "https://cdn.jsdelivr.net/gh/xixu-me/RFM@basic/telegramcidr.mrs" }
+        }
+    };
+
+    // ========== 保留原始的覆盖行为 ==========
+    Object.assign(config, override);
+
+    // ========== 国家/地区自动分组逻辑 ==========
+    const COUNTRY = [
+        ["🇭🇰香港",     /🇭🇰|香港|深港|沪港|京港|(?<=^|\W)HK(?=\W|\d|$)|Hong\s*Kong/i],
+        ["🇹🇼台湾",     /🇹🇼|台湾|台北|台(?!州)|(?<=^|\W)TW(?=\W|\d|$)|Taiwan|Taipei/i],
+        ["🇸🇬新加坡",   /🇸🇬|新加坡|狮城|(?<=^|\W)SG(?=\W|\d|$)/i],
+        ["🇯🇵日本",     /🇯🇵|日本|东京|大阪|川崎|福冈|广岛|(?<=^|\W)JP(?=\W|\d|$)|Japan|Tokyo/i],
+        ["🇺🇸美国",     /🇺🇸|美国|俄勒冈|洛杉矶|纽约|西雅图|圣何塞|硅谷|达拉斯|芝加哥|迈阿密|凤凰城|(?<=^|\W)US(?=\W|\d|$)|America/i],
+        ["🇰🇷韩国",     /🇰🇷|韩国|首尔|釜山|(?<=^|\W)KR(?=\W|\d|$)|Korea/i],
+        ["🇨🇦加拿大",   /🇨🇦|加拿大|多伦多|温哥华|蒙特利尔|(?<=^|\W)CA(?=\W|\d|$)/i],
+        ["🇬🇧英国",     /🇬🇧|英国|伦敦|曼彻斯特|(?<=^|\W)UK(?=\W|\d|$)|Britain|United\s*Kingdom/i],
+        ["🇩🇪德国",     /🇩🇪|德国|柏林|法兰克福|慕尼黑|(?<=^|\W)DE(?=\W|\d|$)/i],
+        ["🇫🇷法国",     /🇫🇷|法国|巴黎|马赛|(?<=^|\W)FR(?=\W|\d|$)/i],
+        ["🇦🇺澳大利亚", /🇦🇺|澳洲|澳大利亚|悉尼|墨尔本|布里斯班|(?<=^|\W)AU(?=\W|\d|$)/i],
+        ["🇮🇳印度",     /🇮🇳|印度(?!尼)|孟买|新德里|班加罗尔|(?<=^|\W)IN(?=\W|\d|$)/i],
+        ["🇳🇱荷兰",     /🇳🇱|荷兰|阿姆斯特丹|(?<=^|\W)NL(?=\W|\d|$)/i],
+        ["🇷🇺俄罗斯",   /🇷🇺|俄罗斯|莫斯科|圣彼得堡|俄(?!勒冈)|(?<=^|\W)RU(?=\W|\d|$)/i],
+        ["🇧🇷巴西",     /🇧🇷|巴西|圣保罗|里约|(?<=^|\W)BR(?=\W|\d|$)/i],
+        ["🇦🇷阿根廷",   /🇦🇷|阿根廷|布宜诺斯艾利斯|(?<=^|\W)AR(?=\W|\d|$)/i],
+        ["🇹🇷土耳其",   /🇹🇷|土耳其|伊斯坦布尔|(?<=^|\W)TR(?=\W|\d|$)/i],
+        ["🇹🇭泰国",     /🇹🇭|泰国|曼谷|清迈|(?<=^|\W)TH(?=\W|\d|$)/i],
+        ["🇻🇳越南",     /🇻🇳|越南|胡志明|河内|(?<=^|\W)VN(?=\W|\d|$)/i],
+        ["🇲🇾马来西亚", /🇲🇾|马来西亚|吉隆坡|(?<=^|\W)MY(?=\W|\d|$)/i],
+        ["🇵🇭菲律宾",   /🇵🇭|菲律宾|马尼拉|(?<=^|\W)PH(?=\W|\d|$)/i],
+        ["🇪🇸西班牙",   /🇪🇸|西班牙|马德里|巴塞罗那|(?<=^|\W)ES(?=\W|\d|$)/i],
+        ["🇮🇹意大利",   /🇮🇹|意大利|米兰|罗马|(?<=^|\W)IT(?=\W|\d|$)/i],
+        ["🇨🇭瑞士",     /🇨🇭|瑞士|苏黎世|(?<=^|\W)CH(?=\W|\d|$)/i],
+        ["🇸🇪瑞典",     /🇸🇪|瑞典|斯德哥尔摩|(?<=^|\W)SE(?=\W|\d|$)/i],
+        ["🇳🇴挪威",     /🇳🇴|挪威|奥斯陆|(?<=^|\W)NO(?=\W|\d|$)/i],
+        ["🇩🇰丹麦",     /🇩🇰|丹麦|哥本哈根|(?<=^|\W)DK(?=\W|\d|$)/i],
+        ["🇫🇮芬兰",     /🇫🇮|芬兰|赫尔辛基|(?<=^|\W)FI(?=\W|\d|$)/i],
+        ["🇧🇪比利时",   /🇧🇪|比利时|布鲁塞尔|(?<=^|\W)BE(?=\W|\d|$)/i],
+        ["🇦🇹奥地利",   /🇦🇹|奥地利|维也纳|(?<=^|\W)AT(?=\W|\d|$)/i],
+        ["🇵🇱波兰",     /🇵🇱|波兰|华沙|(?<=^|\W)PL(?=\W|\d|$)/i],
+        ["🇦🇱阿尔巴尼亚", /🇦🇱|阿尔巴尼亚|地拉那|(?<=^|\W)AL(?=\W|\d|$)/i]
+    ];
+
+    function escapeRegExp(string) {
+        return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    const proxies = config.proxies || [];
+    const uniqueProxies = [...new Map(proxies.map(p => [p.name, p])).values()];
+
+    const countryNodes = new Map();
+    const unmatchedProxies = [];
+
+    for (const p of uniqueProxies) {
+        if (!p || !p.name) continue;
+        let matched = false;
+        for (const [groupName, re] of COUNTRY) {
+            if (re.test(p.name)) {
+                if (!countryNodes.has(groupName)) countryNodes.set(groupName, []);
+                countryNodes.get(groupName).push(p);
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) {
+            unmatchedProxies.push(p);
+        }
+    }
+
+    // 重命名节点为 “国旗 + 国家名 - 序号”
+    // 注意：原配置中若有直接引用节点名的策略组，重命名后需手动更新
+    for (const [stdName, nodes] of countryNodes) {
+        nodes.forEach((node, index) => {
+            const num = String(index + 1).padStart(2, '0');
+            node.name = `${stdName} - ${num}`;
+        });
+    }
+
+    // 保留有节点的国家，维持原顺序
+    const matchedCountries = [];
+    for (const [name] of COUNTRY) {
+        if (countryNodes.has(name)) matchedCountries.push([name]);
+    }
+
+    // 清理旧的自动国家组（通过 _autoGroup 标记区分，避免误删手动组）
+    if (!Array.isArray(config["proxy-groups"])) config["proxy-groups"] = [];
+    config["proxy-groups"] = config["proxy-groups"].filter(g => {
+        if (g._autoGroup === true) return false;          // 删除上次脚本生成的组
+        if (g.name === "🌐其他策略" && g._autoGroup === undefined) return false; // 删除旧版未标记的“其他策略”
+        return true;
+    });
+
+    // URL 测试组模板
+    const urlTestBase = {
+        type: "url-test",
+        lazy: true,
+        "include-all": true,
+        "exclude-type": "direct",
+        url: "https://www.gstatic.com/generate_204",
+        interval: 300,
+        tolerance: 30,
+        timeout: 5000,
+        _autoGroup: true   // 内部标记，下次覆盖时只清除这种组
+    };
+
+    const newGroupNames = [];
+    for (const [name] of matchedCountries) {
+        const groupName = `${name}策略`;
+        newGroupNames.push(groupName);
+        config["proxy-groups"].push({
+            ...urlTestBase,
+            name: groupName,
+            filter: `^${escapeRegExp(name)}`
+        });
+    }
+
+    if (unmatchedProxies.length > 0) {
+        const otherGroup = { ...urlTestBase, name: "🌐其他策略" };
+        if (matchedCountries.length > 0) {
+            const excludePattern = matchedCountries
+                .map(c => `^${escapeRegExp(c[0])}`)
+                .join("|");
+            otherGroup["exclude-filter"] = excludePattern;
+        }
+        newGroupNames.push("🌐其他策略");
+        config["proxy-groups"].push(otherGroup);
+    }
+
+    // 注入主策略组
+    const strategyGroup = config["proxy-groups"].find(g => g.name === "🌍策略选择");
+    if (strategyGroup) {
+        strategyGroup.proxies = newGroupNames.length > 0 ? newGroupNames : ["DIRECT"];
+    }
+
+    return config;
+}
+
+if (typeof module !== "undefined") {
+    module.exports = main;
+}
