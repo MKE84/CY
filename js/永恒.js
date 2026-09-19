@@ -479,6 +479,19 @@ function _detail(id) {
 // WASM 加密(nbmovie_wasm)取不到直链；兄弟(brovod.com)站点已失联；
 // 枫叶搜索页结构不稳定且主站均在 Akamai 后面。
 
+// ============================================================
+// 合集绑定：本 js 永远只对 py/合集.py 内的爬虫源做扫描。
+// 白名单 = 合集.py 调度壳里 extend.spider 支持的爬虫名。
+// 不在表内的条目即使写进 SCAN_SOURCES 也一律不执行。
+// 想加/减扫描源，先改 py/合集.py，再同步改这张表。
+// ============================================================
+var 合集绑定 = {
+  '视觉影院': '视觉',
+  '毒舌影视': '毒舌',
+  '追光影视': '追光',
+  '七猫短剧': '七猫'
+};
+
 var SCAN_SOURCES = [
   {
     name: '视觉影院',
@@ -623,6 +636,8 @@ function _scanTitle(title) {
   var results = [];
   for (var i = 0; i < SCAN_SOURCES.length; i++) {
     var src = SCAN_SOURCES[i];
+    // 合集绑定：只执行 py/合集.py 白名单内的源
+    if (!合集绑定.hasOwnProperty(src.name)) continue;
     try {
       // 自定义多步取线（追光/七猫等）优先
       if (typeof src.fetchLine === 'function') {
