@@ -1,0 +1,17 @@
+{
+    "sites": [
+        {
+            "key": "永恒专属",
+            "name": "永恒专属",
+            "type": 3,
+            "api": "./js/永恒.js",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1,
+            "style": {
+                "type": "card",
+                "ratio": 0.7
+            }
+        }
+    ]
+}
