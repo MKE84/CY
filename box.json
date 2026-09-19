@@ -1,0 +1,17 @@
+{
+    "sites": [
+        {
+            "key": "云海影视",
+            "name": "云海影视",
+            "type": 3,
+            "api": "./js/云海.js",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1,
+            "style": {
+                "type": "card",
+                "ratio": 0.7
+            }
+        }
+    ]
+}
