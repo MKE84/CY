@@ -619,6 +619,26 @@ function _matchItem(html, re, titleGroup, title) {
 
 var _SCAN_CACHE = {};
 
+// 2026-09 加固三：谁快先用谁。
+// 记录每个源的历史耗时/命中率，扫描按"最快的源先试"排序；
+// 拿到第一条经验证的直链就立刻返回，不再等其余源扫完。
+// （JS 引擎是同步单线程，做不到真并发——靠"学习排序+命中即停"达到同样效果）
+var _SRC_STATS = {};
+
+function _srcOrder() {
+  var idx = [];
+  for (var i = 0; i < SCAN_SOURCES.length; i++) idx.push(i);
+  idx.sort(function (a, b) {
+    var sa = _SRC_STATS[SCAN_SOURCES[a].name] || { n: 0, ms: 0, ok: 0 };
+    var sb = _SRC_STATS[SCAN_SOURCES[b].name] || { n: 0, ms: 0, ok: 0 };
+    // 平均耗时升序；从未测过的源排最前（未知源优先给它机会）
+    var va = sa.n ? sa.ms / sa.n : 0;
+    var vb = sb.n ? sb.ms / sb.n : 0;
+    return va - vb;
+  });
+  return idx;
+}
+
 // 直链可达性验证：轻量拉一次 m3u8，死 CDN 当场淘汰
 // （实测 yddsha2/qrssv 这类半死 CDN：ConnectException / TLS 握手被掐）
 function _verifyM3u8(u) {
@@ -629,20 +649,29 @@ function _verifyM3u8(u) {
 }
 
 // 按片名扫描各源，返回 [{name, url}]（url 为 m3u8 直链）
+// 2026-09 改版：最快命中的源直接返回（1 条线路），后续调用由缓存秒回
 function _scanTitle(title) {
   if (!title) return [];
   var key = 's:' + title;
   if (_SCAN_CACHE[key]) return _SCAN_CACHE[key];
   var results = [];
-  for (var i = 0; i < SCAN_SOURCES.length; i++) {
+  var hit = false;
+  var order = _srcOrder();
+  for (var oi = 0; oi < order.length && !hit; oi++) {
+    var i = order[oi];
     var src = SCAN_SOURCES[i];
     // 合集绑定：只执行 py/合集.py 白名单内的源
     if (!合集绑定.hasOwnProperty(src.name)) continue;
+    var st = _SRC_STATS[src.name] || (_SRC_STATS[src.name] = { n: 0, ms: 0, ok: 0 });
+    var t0 = Date.now();
     try {
       // 自定义多步取线（追光/七猫等）优先
       if (typeof src.fetchLine === 'function') {
         var line = src.fetchLine(title);
-        if (line && line.url && _verifyM3u8(line.url)) results.push({ name: line.name || src.name, url: line.url });
+        if (line && line.url && _verifyM3u8(line.url)) {
+          results.push({ name: line.name || src.name, url: line.url });
+          hit = true;
+        }
         continue;
       }
       var url = src.search.replace('{q}', encodeURIComponent(title));
@@ -659,8 +688,16 @@ function _scanTitle(title) {
 // 2026-09 加固二：扫到直链后先验证 CDN 可达（发一次轻量请求），
 // 避免把死 CDN 的线路推给播放器无限转圈（实测 yddsha2/qrssv 这类半死 CDN）
       var real = mm[1].replace(/\\\//g, '/');
-      if (real && _verifyM3u8(real)) results.push({ name: src.name, url: real });
-    } catch (e) {}
+      if (real && _verifyM3u8(real)) {
+        results.push({ name: src.name, url: real });
+        hit = true;
+      }
+    } catch (e) {
+    } finally {
+      st.n++;
+      st.ms += (Date.now() - t0);
+      if (hit) st.ok++;
+    }
   }
   _SCAN_CACHE[key] = results;
   return results;
