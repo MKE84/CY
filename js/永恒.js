@@ -458,16 +458,28 @@ function _collectionSearch(wd) {
 function _search(wd, quick, pg) {
   var base = { page: 1, pagecount: 1, limit: 20 };
   if (!wd) return JSON.stringify({ list: [], page: 1, pagecount: 1, limit: 20, total: 0 });
-  // 预处理：去掉季数后缀与空格的裸词（豆瓣/源站搜裸词更容易命中）
-  var wd2 = String(wd).replace(/第[一二三四五六七八九十\d]+[季部]/g, '').replace(/\s+/g, '').trim();
-  // 1. 豆瓣
+  wd = String(wd);
+  // 2026-09 加固五：quickSearch 常传来整页垃圾标题，如
+  // "2026剧情片《抓特务》HD高清全集视频在线观看" —— 优先提取《书名号》内片名
+  var mBk = wd.match(/《([^《》]{1,30})》/);
+  var wdBk = mBk ? mBk[1].trim() : '';
+  // 预处理：去掉季数后缀/空格/常见垃圾尾巴
+  var wd2 = wd.replace(/第[一二三四五六七八九十\d]+[季部]/g, '')
+              .replace(/(HD|全集|高清|在线观看|完整版|视频|剧情片|电视剧|第\d+集|预告|抢先看|国语|中字)/g, '')
+              .replace(/\s+/g, '').trim();
+  if (!wd2 && wdBk) wd2 = wdBk;
+  // 1. 豆瓣（原词 → 书名号片名 → 裸词）
   var arr = _doubanSearch(wd);
-  // 2. 豆瓣空 → 用裸词重试（实测"剑来 第三季"403、"剑来"200）
+  if (arr.length === 0 && wdBk && wdBk !== wd) arr = _doubanSearch(wdBk);
   if (arr.length === 0 && wd2 && wd2 !== wd) arr = _doubanSearch(wd2);
-  // 3. 仍空 → 合集直搜（先原词，后裸词）
+  // 2. 豆瓣全空 → 合集直搜（书名号片名 → 原词 → 裸词）
   if (arr.length === 0) {
-    var fb = _collectionSearch(wd);
-    if (fb.length === 0 && wd2 && wd2 !== wd) fb = _collectionSearch(wd2);
+    var tries = [];
+    if (wdBk) tries.push(wdBk);
+    tries.push(wd);
+    if (wd2 && tries.indexOf(wd2) < 0) tries.push(wd2);
+    var fb = [];
+    for (var ti = 0; ti < tries.length && fb.length === 0; ti++) fb = _collectionSearch(tries[ti]);
     if (fb.length > 0) return JSON.stringify({ list: fb, page: 1, pagecount: 1, limit: 20, total: fb.length });
   }
   return JSON.stringify({ list: arr, page: base.page, pagecount: base.pagecount, limit: base.limit, total: arr.length });
@@ -503,6 +515,8 @@ function _detailSource(id) {
         if (tm) vod.vod_name = _cleanTitle(tm[1].replace(/\s*[-–—].*$/, ''));
       }
     }
+    // 直搜详情同样要验证 CDN——否则死 CDN 的线路会送到播放器无限转圈
+    if (m3u8 && !_verifyM3u8(m3u8)) m3u8 = '';
   } catch (e) {}
   if (m3u8) {
     vod.vod_play_from = sname;
