@@ -382,12 +382,12 @@ function _category(tid, pg, filter, extend) {
   return JSON.stringify(out);
 }
 
-// ---------- 搜索：豆瓣 rexxar 搜索 + 合集直搜兜底 ----------
+// ---------- 搜索：豆瓣 rexxar 搜索 + 源站直搜兜底 ----------
 // 2026-09 加固四：豆瓣 rexxar 接口间歇性 403/空结果（实测"剑来 第三季"403、
 // 裸词"剑来"200）。三级策略：
 //   1. 豆瓣搜索
 //   2. 空结果 → 去掉"第X季/部"和空格重试豆瓣（实测裸词能过）
-//   3. 仍空 → 合集直搜：直接搜白名单内的合集源，详情页由对应源出片
+//   3. 仍空 → 源站直搜：直接搜白名单内的爬虫源，详情页由对应源出片
 
 function _cleanTitle(s) {
   return String(s || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
@@ -410,7 +410,7 @@ function _doubanSearch(q) {
   return out;
 }
 
-// 合集直搜：逐源搜关键词，收集带标题的条目
+// 源站直搜：逐源搜关键词，收集带标题的条目
 // vod_id 格式 '源名|标识'：通用源=播放页路径，fetchLine源=标题
 function _collectionSearch(wd) {
   var arr = [];
@@ -419,12 +419,12 @@ function _collectionSearch(wd) {
     title = _cleanTitle(title).replace(/^立刻播放/, '');
     if (!ident || !title || seen[title]) return;
     seen[title] = 1;
-    arr.push({ vod_id: name + '|' + ident, vod_name: title, vod_pic: pic || '', vod_remarks: '合集·' + name });
+    arr.push({ vod_id: name + '|' + ident, vod_name: title, vod_pic: pic || '', vod_remarks: '直搜·' + name });
   }
   var order = _srcOrder();
   for (var oi = 0; oi < order.length && arr.length < 12; oi++) {
     var src = SCAN_SOURCES[order[oi]];
-    if (!合集绑定.hasOwnProperty(src.name)) continue;
+    if (!SCAN_BINDING.hasOwnProperty(src.name)) continue;
     try {
       var sh = _req(src.search.replace('{q}', encodeURIComponent(wd)));
       if (!sh || sh.length < 400) continue;
@@ -472,7 +472,7 @@ function _search(wd, quick, pg) {
   var arr = _doubanSearch(wd);
   if (arr.length === 0 && wdBk && wdBk !== wd) arr = _doubanSearch(wdBk);
   if (arr.length === 0 && wd2 && wd2 !== wd) arr = _doubanSearch(wd2);
-  // 2. 豆瓣全空 → 合集直搜（书名号片名 → 原词 → 裸词）
+  // 2. 豆瓣全空 → 源站直搜（书名号片名 → 原词 → 裸词）
   if (arr.length === 0) {
     var tries = [];
     if (wdBk) tries.push(wdBk);
@@ -486,7 +486,7 @@ function _search(wd, quick, pg) {
 }
 
 // ---------- 详情：豆瓣 rexxar ----------
-// 2026-09 加固四：合集直搜条目的详情——vod_id = '源名|标识'
+// 2026-09 加固四：源站直搜条目的详情——vod_id = '源名|标识'
 // 通用源标识=播放页路径（直接抓播放页提 m3u8）；fetchLine源标识=标题（走其 fetchLine）
 
 function _detailSource(id) {
@@ -497,7 +497,7 @@ function _detailSource(id) {
   for (var i = 0; i < SCAN_SOURCES.length; i++) {
     if (SCAN_SOURCES[i].name === sname) { src = SCAN_SOURCES[i]; break; }
   }
-  if (!src || !合集绑定[sname]) return null;
+  if (!src || !SCAN_BINDING[sname]) return null;
   var vod = { vod_id: sname + '|' + sid, vod_name: sid, vod_pic: '', vod_remarks: '', vod_content: '', vod_play_from: '', vod_play_url: '' };
   var m3u8 = '';
   try {
@@ -521,13 +521,13 @@ function _detailSource(id) {
   if (m3u8) {
     vod.vod_play_from = sname;
     vod.vod_play_url = '正片$' + m3u8;
-    vod.vod_remarks = '合集·' + sname;
+    vod.vod_remarks = '直搜·' + sname;
   }
   return JSON.stringify({ list: [vod] });
 }
 
 function _detail(id) {
-  // 合集直搜条目（'源名|标识'）→ 由对应源出片
+  // 源站直搜条目（'源名|标识'）→ 由对应源出片
   if (String(id || '').indexOf('|') > -1) {
     var dsr = _detailSource(id);
     if (dsr) return dsr;
@@ -604,7 +604,7 @@ function _detail(id) {
 // 不在表内的条目即使写进 SCAN_SOURCES 也一律不执行。
 // 加/减扫描源：改 py/ 下对应爬虫后，同步改这张表。
 // ============================================================
-var 合集绑定 = {
+var SCAN_BINDING = {
   '视觉影院': '视觉',
   '毒舌影视': '毒舌',
   '追光影视': '追光',
@@ -619,7 +619,7 @@ var SCAN_SOURCES = [
     titleGroup: 2,
     play: function (p) { return 'https://www.sypfjy.com' + p; },
     m3u8Re: /"url":"(https?:\\?\/\\?\/[^"]+?\.m3u8[^"]*)"/g,
-    // 合集直搜用：搜索页逐条收集（id组1=播放页路径, 组2=标题）
+    // 源站直搜用：搜索页逐条收集（id组1=播放页路径, 组2=标题）
     listRe: /href="(\/vodplay\/\d+-1-1\.html)"[^>]*title="([^"]*)"/g,
     listTitleGroup: 2
   },
@@ -630,7 +630,7 @@ var SCAN_SOURCES = [
     titleGroup: 0,
     play: function (id) { return 'https://m.xnhrsb.com/dsshiyipy/' + id + '-1-1.html'; },
     m3u8Re: /"url":"(https?:\\?\/\\?\/[^"]+?\.m3u8[^"]*)"/g,
-    // 合集直搜用：dsshiyidt 链接 + 后方 alt="标题"
+    // 源站直搜用：dsshiyidt 链接 + 后方 alt="标题"
     listRe: /href="\/dsshiyidt\/(\d+)\.html"[\s\S]{0,300}?alt="([^"]*)"/g,
     listTitleGroup: 2
   },
@@ -785,8 +785,8 @@ function _scanTitle(title) {
   for (var oi = 0; oi < order.length && !hit; oi++) {
     var i = order[oi];
     var src = SCAN_SOURCES[i];
-    // 合集绑定：只执行 py/合集.py 白名单内的源
-    if (!合集绑定.hasOwnProperty(src.name)) continue;
+    // SCAN_BINDING：只执行白名单内的独立爬虫源
+    if (!SCAN_BINDING.hasOwnProperty(src.name)) continue;
     var st = _SRC_STATS[src.name] || (_SRC_STATS[src.name] = { n: 0, ms: 0, ok: 0 });
     var t0 = Date.now();
     try {
