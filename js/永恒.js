@@ -382,36 +382,142 @@ function _category(tid, pg, filter, extend) {
   return JSON.stringify(out);
 }
 
-// ---------- 搜索：豆瓣 rexxar 搜索 ----------
+// ---------- 搜索：豆瓣 rexxar 搜索 + 合集直搜兜底 ----------
+// 2026-09 加固四：豆瓣 rexxar 接口间歇性 403/空结果（实测"剑来 第三季"403、
+// 裸词"剑来"200）。三级策略：
+//   1. 豆瓣搜索
+//   2. 空结果 → 去掉"第X季/部"和空格重试豆瓣（实测裸词能过）
+//   3. 仍空 → 合集直搜：直接搜白名单内的合集源，详情页由对应源出片
 
-function _search(wd, quick, pg) {
-  var arr = [];
-  var total = 0;
+function _cleanTitle(s) {
+  return String(s || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function _doubanSearch(q) {
+  var out = [];
   try {
-    if (!wd) return JSON.stringify({ list: [], page: 1, pagecount: 1, limit: 20, total: 0 });
-    var d = _getJSON('https://m.douban.com/rexxar/api/v2/search?q=' + encodeURIComponent(wd));
+    var d = _getJSON('https://m.douban.com/rexxar/api/v2/search?q=' + encodeURIComponent(q));
     if (d && d.subjects && d.subjects.items && d.subjects.items.length > 0) {
-      total = d.subjects.items.length;
       for (var i = 0; i < d.subjects.items.length; i++) {
         var t = d.subjects.items[i].target;
         if (!t || !t.id) continue;
         var pic = t.cover_url || '';
         var rate = (t.rating && t.rating.value !== undefined && t.rating.value !== null) ? String(t.rating.value) : '暂无评分';
-        arr.push({
-          vod_id: String(t.id),
-          vod_name: t.title || wd,
-          vod_pic: pic,
-          vod_remarks: rate
-        });
+        out.push({ vod_id: String(t.id), vod_name: t.title || q, vod_pic: pic, vod_remarks: rate });
       }
     }
   } catch (e) {}
-  return JSON.stringify({ list: arr, page: 1, pagecount: 1, limit: 20, total: total });
+  return out;
+}
+
+// 合集直搜：逐源搜关键词，收集带标题的条目
+// vod_id 格式 '源名|标识'：通用源=播放页路径，fetchLine源=标题
+function _collectionSearch(wd) {
+  var arr = [];
+  var seen = {};
+  function push(name, ident, title, pic) {
+    title = _cleanTitle(title).replace(/^立刻播放/, '');
+    if (!ident || !title || seen[title]) return;
+    seen[title] = 1;
+    arr.push({ vod_id: name + '|' + ident, vod_name: title, vod_pic: pic || '', vod_remarks: '合集·' + name });
+  }
+  var order = _srcOrder();
+  for (var oi = 0; oi < order.length && arr.length < 12; oi++) {
+    var src = SCAN_SOURCES[order[oi]];
+    if (!合集绑定.hasOwnProperty(src.name)) continue;
+    try {
+      var sh = _req(src.search.replace('{q}', encodeURIComponent(wd)));
+      if (!sh || sh.length < 400) continue;
+      if (typeof src.fetchLine === 'function') {
+        // 追光：voddetail 链接 + title 属性
+        var re = /<a[^>]+href="\/voddetail\/(\d+)\.html"[^>]*title="([^"]*)"/g;
+        var m, n = 0;
+        while ((m = re.exec(sh)) !== null && n < 8) {
+          n++;
+          if (src.name === '七猫短剧') {
+            var tm = /MTagBookList_bookName[^>]*>([^<]+)<\/a>/.exec(sh.substr(m.index, 800));
+            if (tm) push(src.name, tm[1], tm[1]);
+          } else {
+            push(src.name, m[2], m[2]);
+          }
+        }
+        continue;
+      }
+      if (!src.listRe) continue;
+      src.listRe.lastIndex = 0;
+      var m2, c = 0;
+      while ((m2 = src.listRe.exec(sh)) !== null && c < 8) {
+        c++;
+        push(src.name, m2[1], m2[src.listTitleGroup || 2]);
+      }
+    } catch (e) {}
+  }
+  return arr;
+}
+
+function _search(wd, quick, pg) {
+  var base = { page: 1, pagecount: 1, limit: 20 };
+  if (!wd) return JSON.stringify({ list: [], page: 1, pagecount: 1, limit: 20, total: 0 });
+  // 预处理：去掉季数后缀与空格的裸词（豆瓣/源站搜裸词更容易命中）
+  var wd2 = String(wd).replace(/第[一二三四五六七八九十\d]+[季部]/g, '').replace(/\s+/g, '').trim();
+  // 1. 豆瓣
+  var arr = _doubanSearch(wd);
+  // 2. 豆瓣空 → 用裸词重试（实测"剑来 第三季"403、"剑来"200）
+  if (arr.length === 0 && wd2 && wd2 !== wd) arr = _doubanSearch(wd2);
+  // 3. 仍空 → 合集直搜（先原词，后裸词）
+  if (arr.length === 0) {
+    var fb = _collectionSearch(wd);
+    if (fb.length === 0 && wd2 && wd2 !== wd) fb = _collectionSearch(wd2);
+    if (fb.length > 0) return JSON.stringify({ list: fb, page: 1, pagecount: 1, limit: 20, total: fb.length });
+  }
+  return JSON.stringify({ list: arr, page: base.page, pagecount: base.pagecount, limit: base.limit, total: arr.length });
 }
 
 // ---------- 详情：豆瓣 rexxar ----------
+// 2026-09 加固四：合集直搜条目的详情——vod_id = '源名|标识'
+// 通用源标识=播放页路径（直接抓播放页提 m3u8）；fetchLine源标识=标题（走其 fetchLine）
+
+function _detailSource(id) {
+  var p = String(id).split('|');
+  if (p.length !== 2) return null;
+  var sname = p[0], sid = p[1];
+  var src = null;
+  for (var i = 0; i < SCAN_SOURCES.length; i++) {
+    if (SCAN_SOURCES[i].name === sname) { src = SCAN_SOURCES[i]; break; }
+  }
+  if (!src || !合集绑定[sname]) return null;
+  var vod = { vod_id: sname + '|' + sid, vod_name: sid, vod_pic: '', vod_remarks: '', vod_content: '', vod_play_from: '', vod_play_url: '' };
+  var m3u8 = '';
+  try {
+    if (typeof src.fetchLine === 'function') {
+      var line = src.fetchLine(sid);
+      if (line && line.url) m3u8 = line.url;
+    } else {
+      var pageUrl = src.play(sid);
+      var ph = _req(pageUrl);
+      if (ph && ph.length > 400) {
+        src.m3u8Re.lastIndex = 0;
+        var mm = src.m3u8Re.exec(ph);
+        if (mm && mm[1]) m3u8 = mm[1].replace(/\\\//g, '/');
+        var tm = /<title>([^<]{1,60})/.exec(ph);
+        if (tm) vod.vod_name = _cleanTitle(tm[1].replace(/\s*[-–—].*$/, ''));
+      }
+    }
+  } catch (e) {}
+  if (m3u8) {
+    vod.vod_play_from = sname;
+    vod.vod_play_url = '正片$' + m3u8;
+    vod.vod_remarks = '合集·' + sname;
+  }
+  return JSON.stringify({ list: [vod] });
+}
 
 function _detail(id) {
+  // 合集直搜条目（'源名|标识'）→ 由对应源出片
+  if (String(id || '').indexOf('|') > -1) {
+    var dsr = _detailSource(id);
+    if (dsr) return dsr;
+  }
   var vid = String(id || '').replace(/[^\d]/g, '');
   var vod = { vod_id: vid, vod_name: '', vod_pic: '', vod_actor: '', vod_director: '', vod_area: '', vod_year: '', vod_remarks: '', vod_content: '', vod_play_from: '', vod_play_url: '' };
   try {
@@ -499,7 +605,10 @@ var SCAN_SOURCES = [
     re: /href="(\/vodplay\/\d+-1-1\.html)"[^>]*title="([^"]*)"/g,
     titleGroup: 2,
     play: function (p) { return 'https://www.sypfjy.com' + p; },
-    m3u8Re: /"url":"(https?:\\?\/\\?\/[^"]+?\.m3u8[^"]*)"/g
+    m3u8Re: /"url":"(https?:\\?\/\\?\/[^"]+?\.m3u8[^"]*)"/g,
+    // 合集直搜用：搜索页逐条收集（id组1=播放页路径, 组2=标题）
+    listRe: /href="(\/vodplay\/\d+-1-1\.html)"[^>]*title="([^"]*)"/g,
+    listTitleGroup: 2
   },
   {
     name: '毒舌影视',
@@ -507,7 +616,10 @@ var SCAN_SOURCES = [
     re: /href="\/dsshiyidt\/(\d+)\.html"/g,
     titleGroup: 0,
     play: function (id) { return 'https://m.xnhrsb.com/dsshiyipy/' + id + '-1-1.html'; },
-    m3u8Re: /"url":"(https?:\\?\/\\?\/[^"]+?\.m3u8[^"]*)"/g
+    m3u8Re: /"url":"(https?:\\?\/\\?\/[^"]+?\.m3u8[^"]*)"/g,
+    // 合集直搜用：dsshiyidt 链接 + 后方 alt="标题"
+    listRe: /href="\/dsshiyidt\/(\d+)\.html"[\s\S]{0,300}?alt="([^"]*)"/g,
+    listTitleGroup: 2
   },
   // ---------- 实验性：自定义多步取线 ----------
   // fetchLine(title) 返回 {name,url} 或 null，走通用三步之外的多跳逻辑。
