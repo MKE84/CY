@@ -382,156 +382,36 @@ function _category(tid, pg, filter, extend) {
   return JSON.stringify(out);
 }
 
-// ---------- 搜索：豆瓣 rexxar 搜索 + 源站直搜兜底 ----------
-// 2026-09 加固四：豆瓣 rexxar 接口间歇性 403/空结果（实测"剑来 第三季"403、
-// 裸词"剑来"200）。三级策略：
-//   1. 豆瓣搜索
-//   2. 空结果 → 去掉"第X季/部"和空格重试豆瓣（实测裸词能过）
-//   3. 仍空 → 源站直搜：直接搜白名单内的爬虫源，详情页由对应源出片
+// ---------- 搜索：豆瓣 rexxar 搜索 ----------
 
-function _cleanTitle(s) {
-  return String(s || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
-}
-
-function _doubanSearch(q) {
-  var out = [];
+function _search(wd, quick, pg) {
+  var arr = [];
+  var total = 0;
   try {
-    var d = _getJSON('https://m.douban.com/rexxar/api/v2/search?q=' + encodeURIComponent(q));
+    if (!wd) return JSON.stringify({ list: [], page: 1, pagecount: 1, limit: 20, total: 0 });
+    var d = _getJSON('https://m.douban.com/rexxar/api/v2/search?q=' + encodeURIComponent(wd));
     if (d && d.subjects && d.subjects.items && d.subjects.items.length > 0) {
+      total = d.subjects.items.length;
       for (var i = 0; i < d.subjects.items.length; i++) {
         var t = d.subjects.items[i].target;
         if (!t || !t.id) continue;
         var pic = t.cover_url || '';
         var rate = (t.rating && t.rating.value !== undefined && t.rating.value !== null) ? String(t.rating.value) : '暂无评分';
-        out.push({ vod_id: String(t.id), vod_name: t.title || q, vod_pic: pic, vod_remarks: rate });
+        arr.push({
+          vod_id: String(t.id),
+          vod_name: t.title || wd,
+          vod_pic: pic,
+          vod_remarks: rate
+        });
       }
     }
   } catch (e) {}
-  return out;
-}
-
-// 源站直搜：逐源搜关键词，收集带标题的条目
-// vod_id 格式 '源名|标识'：通用源=播放页路径，fetchLine源=标题
-function _collectionSearch(wd) {
-  var arr = [];
-  var seen = {};
-  function push(name, ident, title, pic) {
-    title = _cleanTitle(title).replace(/^立刻播放/, '');
-    if (!ident || !title || seen[title]) return;
-    seen[title] = 1;
-    arr.push({ vod_id: name + '|' + ident, vod_name: title, vod_pic: pic || '', vod_remarks: '直搜·' + name });
-  }
-  var order = _srcOrder();
-  for (var oi = 0; oi < order.length && arr.length < 12; oi++) {
-    var src = SCAN_SOURCES[order[oi]];
-    if (!SCAN_BINDING.hasOwnProperty(src.name)) continue;
-    try {
-      var sh = _req(src.search.replace('{q}', encodeURIComponent(wd)));
-      if (!sh || sh.length < 400) continue;
-      if (typeof src.fetchLine === 'function') {
-        // 追光：voddetail 链接 + title 属性
-        var re = /<a[^>]+href="\/voddetail\/(\d+)\.html"[^>]*title="([^"]*)"/g;
-        var m, n = 0;
-        while ((m = re.exec(sh)) !== null && n < 8) {
-          n++;
-          if (src.name === '七猫短剧') {
-            var tm = /MTagBookList_bookName[^>]*>([^<]+)<\/a>/.exec(sh.substr(m.index, 800));
-            if (tm) push(src.name, tm[1], tm[1]);
-          } else {
-            push(src.name, m[2], m[2]);
-          }
-        }
-        continue;
-      }
-      if (!src.listRe) continue;
-      src.listRe.lastIndex = 0;
-      var m2, c = 0;
-      while ((m2 = src.listRe.exec(sh)) !== null && c < 8) {
-        c++;
-        push(src.name, m2[1], m2[src.listTitleGroup || 2]);
-      }
-    } catch (e) {}
-  }
-  return arr;
-}
-
-function _search(wd, quick, pg) {
-  var base = { page: 1, pagecount: 1, limit: 20 };
-  if (!wd) return JSON.stringify({ list: [], page: 1, pagecount: 1, limit: 20, total: 0 });
-  wd = String(wd);
-  // 2026-09 加固五：quickSearch 常传来整页垃圾标题，如
-  // "2026剧情片《抓特务》HD高清全集视频在线观看" —— 优先提取《书名号》内片名
-  var mBk = wd.match(/《([^《》]{1,30})》/);
-  var wdBk = mBk ? mBk[1].trim() : '';
-  // 预处理：去掉季数后缀/空格/常见垃圾尾巴
-  var wd2 = wd.replace(/第[一二三四五六七八九十\d]+[季部]/g, '')
-              .replace(/(HD|全集|高清|在线观看|完整版|视频|剧情片|电视剧|第\d+集|预告|抢先看|国语|中字)/g, '')
-              .replace(/\s+/g, '').trim();
-  if (!wd2 && wdBk) wd2 = wdBk;
-  // 1. 豆瓣（原词 → 书名号片名 → 裸词）
-  var arr = _doubanSearch(wd);
-  if (arr.length === 0 && wdBk && wdBk !== wd) arr = _doubanSearch(wdBk);
-  if (arr.length === 0 && wd2 && wd2 !== wd) arr = _doubanSearch(wd2);
-  // 2. 豆瓣全空 → 源站直搜（书名号片名 → 原词 → 裸词）
-  if (arr.length === 0) {
-    var tries = [];
-    if (wdBk) tries.push(wdBk);
-    tries.push(wd);
-    if (wd2 && tries.indexOf(wd2) < 0) tries.push(wd2);
-    var fb = [];
-    for (var ti = 0; ti < tries.length && fb.length === 0; ti++) fb = _collectionSearch(tries[ti]);
-    if (fb.length > 0) return JSON.stringify({ list: fb, page: 1, pagecount: 1, limit: 20, total: fb.length });
-  }
-  return JSON.stringify({ list: arr, page: base.page, pagecount: base.pagecount, limit: base.limit, total: arr.length });
+  return JSON.stringify({ list: arr, page: 1, pagecount: 1, limit: 20, total: total });
 }
 
 // ---------- 详情：豆瓣 rexxar ----------
-// 2026-09 加固四：源站直搜条目的详情——vod_id = '源名|标识'
-// 通用源标识=播放页路径（直接抓播放页提 m3u8）；fetchLine源标识=标题（走其 fetchLine）
-
-function _detailSource(id) {
-  var p = String(id).split('|');
-  if (p.length !== 2) return null;
-  var sname = p[0], sid = p[1];
-  var src = null;
-  for (var i = 0; i < SCAN_SOURCES.length; i++) {
-    if (SCAN_SOURCES[i].name === sname) { src = SCAN_SOURCES[i]; break; }
-  }
-  if (!src || !SCAN_BINDING[sname]) return null;
-  var vod = { vod_id: sname + '|' + sid, vod_name: sid, vod_pic: '', vod_remarks: '', vod_content: '', vod_play_from: '', vod_play_url: '' };
-  var m3u8 = '';
-  try {
-    if (typeof src.fetchLine === 'function') {
-      var line = src.fetchLine(sid);
-      if (line && line.url) m3u8 = line.url;
-    } else {
-      var pageUrl = src.play(sid);
-      var ph = _req(pageUrl);
-      if (ph && ph.length > 400) {
-        src.m3u8Re.lastIndex = 0;
-        var mm = src.m3u8Re.exec(ph);
-        if (mm && mm[1]) m3u8 = mm[1].replace(/\\\//g, '/');
-        var tm = /<title>([^<]{1,60})/.exec(ph);
-        if (tm) vod.vod_name = _cleanTitle(tm[1].replace(/\s*[-–—].*$/, ''));
-      }
-    }
-    // 直搜详情同样要验证 CDN——否则死 CDN 的线路会送到播放器无限转圈
-    if (m3u8 && !_verifyM3u8(m3u8)) m3u8 = '';
-  } catch (e) {}
-  if (m3u8) {
-    vod.vod_play_from = sname;
-    vod.vod_play_url = '正片$' + m3u8;
-    vod.vod_remarks = '直搜·' + sname;
-  }
-  return JSON.stringify({ list: [vod] });
-}
 
 function _detail(id) {
-  // 源站直搜条目（'源名|标识'）→ 由对应源出片
-  if (String(id || '').indexOf('|') > -1) {
-    var dsr = _detailSource(id);
-    if (dsr) return dsr;
-  }
   var vid = String(id || '').replace(/[^\d]/g, '');
   var vod = { vod_id: vid, vod_name: '', vod_pic: '', vod_actor: '', vod_director: '', vod_area: '', vod_year: '', vod_remarks: '', vod_content: '', vod_play_from: '', vod_play_url: '' };
   try {
@@ -599,18 +479,6 @@ function _detail(id) {
 // WASM 加密(nbmovie_wasm)取不到直链；兄弟(brovod.com)站点已失联；
 // 枫叶搜索页结构不稳定且主站均在 Akamai 后面。
 
-// ============================================================
-// 扫描白名单：本 js 只扫描白名单内的源（对应 py/ 目录下的独立爬虫）。
-// 不在表内的条目即使写进 SCAN_SOURCES 也一律不执行。
-// 加/减扫描源：改 py/ 下对应爬虫后，同步改这张表。
-// ============================================================
-var SCAN_BINDING = {
-  '视觉影院': '视觉',
-  '毒舌影视': '毒舌',
-  '追光影视': '追光',
-  '七猫短剧': '七猫'
-};
-
 var SCAN_SOURCES = [
   {
     name: '视觉影院',
@@ -618,10 +486,7 @@ var SCAN_SOURCES = [
     re: /href="(\/vodplay\/\d+-1-1\.html)"[^>]*title="([^"]*)"/g,
     titleGroup: 2,
     play: function (p) { return 'https://www.sypfjy.com' + p; },
-    m3u8Re: /"url":"(https?:\\?\/\\?\/[^"]+?\.m3u8[^"]*)"/g,
-    // 源站直搜用：搜索页逐条收集（id组1=播放页路径, 组2=标题）
-    listRe: /href="(\/vodplay\/\d+-1-1\.html)"[^>]*title="([^"]*)"/g,
-    listTitleGroup: 2
+    m3u8Re: /"url":"(https?:\\?\/\\?\/[^"]+?\.m3u8[^"]*)"/g
   },
   {
     name: '毒舌影视',
@@ -629,10 +494,7 @@ var SCAN_SOURCES = [
     re: /href="\/dsshiyidt\/(\d+)\.html"/g,
     titleGroup: 0,
     play: function (id) { return 'https://m.xnhrsb.com/dsshiyipy/' + id + '-1-1.html'; },
-    m3u8Re: /"url":"(https?:\\?\/\\?\/[^"]+?\.m3u8[^"]*)"/g,
-    // 源站直搜用：dsshiyidt 链接 + 后方 alt="标题"
-    listRe: /href="\/dsshiyidt\/(\d+)\.html"[\s\S]{0,300}?alt="([^"]*)"/g,
-    listTitleGroup: 2
+    m3u8Re: /"url":"(https?:\\?\/\\?\/[^"]+?\.m3u8[^"]*)"/g
   },
   // ---------- 实验性：自定义多步取线 ----------
   // fetchLine(title) 返回 {name,url} 或 null，走通用三步之外的多跳逻辑。
@@ -744,26 +606,6 @@ function _matchItem(html, re, titleGroup, title) {
 
 var _SCAN_CACHE = {};
 
-// 2026-09 加固三：谁快先用谁。
-// 记录每个源的历史耗时/命中率，扫描按"最快的源先试"排序；
-// 拿到第一条经验证的直链就立刻返回，不再等其余源扫完。
-// （JS 引擎是同步单线程，做不到真并发——靠"学习排序+命中即停"达到同样效果）
-var _SRC_STATS = {};
-
-function _srcOrder() {
-  var idx = [];
-  for (var i = 0; i < SCAN_SOURCES.length; i++) idx.push(i);
-  idx.sort(function (a, b) {
-    var sa = _SRC_STATS[SCAN_SOURCES[a].name] || { n: 0, ms: 0, ok: 0 };
-    var sb = _SRC_STATS[SCAN_SOURCES[b].name] || { n: 0, ms: 0, ok: 0 };
-    // 平均耗时升序；从未测过的源排最前（未知源优先给它机会）
-    var va = sa.n ? sa.ms / sa.n : 0;
-    var vb = sb.n ? sb.ms / sb.n : 0;
-    return va - vb;
-  });
-  return idx;
-}
-
 // 直链可达性验证：轻量拉一次 m3u8，死 CDN 当场淘汰
 // （实测 yddsha2/qrssv 这类半死 CDN：ConnectException / TLS 握手被掐）
 function _verifyM3u8(u) {
@@ -774,29 +616,18 @@ function _verifyM3u8(u) {
 }
 
 // 按片名扫描各源，返回 [{name, url}]（url 为 m3u8 直链）
-// 2026-09 改版：最快命中的源直接返回（1 条线路），后续调用由缓存秒回
 function _scanTitle(title) {
   if (!title) return [];
   var key = 's:' + title;
   if (_SCAN_CACHE[key]) return _SCAN_CACHE[key];
   var results = [];
-  var hit = false;
-  var order = _srcOrder();
-  for (var oi = 0; oi < order.length && !hit; oi++) {
-    var i = order[oi];
+  for (var i = 0; i < SCAN_SOURCES.length; i++) {
     var src = SCAN_SOURCES[i];
-    // SCAN_BINDING：只执行白名单内的独立爬虫源
-    if (!SCAN_BINDING.hasOwnProperty(src.name)) continue;
-    var st = _SRC_STATS[src.name] || (_SRC_STATS[src.name] = { n: 0, ms: 0, ok: 0 });
-    var t0 = Date.now();
     try {
       // 自定义多步取线（追光/七猫等）优先
       if (typeof src.fetchLine === 'function') {
         var line = src.fetchLine(title);
-        if (line && line.url && _verifyM3u8(line.url)) {
-          results.push({ name: line.name || src.name, url: line.url });
-          hit = true;
-        }
+        if (line && line.url && _verifyM3u8(line.url)) results.push({ name: line.name || src.name, url: line.url });
         continue;
       }
       var url = src.search.replace('{q}', encodeURIComponent(title));
@@ -813,16 +644,8 @@ function _scanTitle(title) {
 // 2026-09 加固二：扫到直链后先验证 CDN 可达（发一次轻量请求），
 // 避免把死 CDN 的线路推给播放器无限转圈（实测 yddsha2/qrssv 这类半死 CDN）
       var real = mm[1].replace(/\\\//g, '/');
-      if (real && _verifyM3u8(real)) {
-        results.push({ name: src.name, url: real });
-        hit = true;
-      }
-    } catch (e) {
-    } finally {
-      st.n++;
-      st.ms += (Date.now() - t0);
-      if (hit) st.ok++;
-    }
+      if (real && _verifyM3u8(real)) results.push({ name: src.name, url: real });
+    } catch (e) {}
   }
   _SCAN_CACHE[key] = results;
   return results;
