@@ -4,158 +4,131 @@
             "key": "永恒专属",
             "name": "永恒专属",
             "type": 3,
-            "api": "./js/永恒.js",
-            "searchable": 1,
-            "quickSearch": 1,
-            "filterable": 1,
             "style": {
                 "type": "card",
                 "ratio": 0.7
-            }
+            },
+            "api": "./js/永恒.js",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1
         },
         {
             "key": "视觉影院",
             "name": "视觉影院",
             "type": 3,
-            "api": "./py/合集.py",
-            "searchable": 1,
-            "quickSearch": 1,
-            "filterable": 1,
             "style": {
                 "type": "card",
                 "ratio": 0.7
             },
-            "extend": {
-                "spider": "视觉"
-            }
-        },
-        {
-            "key": "毒舌影视",
-            "name": "毒舌影视",
-            "type": 3,
-            "api": "./py/合集.py",
+            "api": "./py/视觉.py",
             "searchable": 1,
             "quickSearch": 1,
-            "filterable": 1,
-            "style": {
-                "type": "card",
-                "ratio": 0.7
-            },
-            "extend": {
-                "spider": "毒舌"
-            }
-        },
-        {
-            "key": "追光影视",
-            "name": "追光影视",
-            "type": 3,
-            "api": "./py/合集.py",
-            "searchable": 1,
-            "quickSearch": 1,
-            "filterable": 1,
-            "style": {
-                "type": "card",
-                "ratio": 0.7
-            },
-            "extend": {
-                "spider": "追光"
-            }
-        },
-        {
-            "key": "七猫影视",
-            "name": "七猫短剧",
-            "type": 3,
-            "api": "./py/合集.py",
-            "searchable": 1,
-            "quickSearch": 1,
-            "filterable": 1,
-            "style": {
-                "type": "card",
-                "ratio": 0.7
-            },
-            "extend": {
-                "spider": "七猫"
-            }
-        },
-        {
-            "key": "4K影视",
-            "name": "4K影视",
-            "type": 3,
-            "api": "./py/合集.py",
-            "searchable": 1,
-            "quickSearch": 1,
-            "filterable": 1,
-            "style": {
-                "type": "card",
-                "ratio": 0.7
-            },
-            "extend": {
-                "spider": "4K"
-            }
+            "filterable": 1
         },
         {
             "key": "奇优影院",
             "name": "奇优影院",
             "type": 3,
-            "api": "./py/合集.py",
-            "searchable": 1,
-            "quickSearch": 1,
-            "filterable": 1,
             "style": {
                 "type": "card",
                 "ratio": 0.7
             },
-            "extend": {
-                "spider": "奇优"
-            }
-        },
-        {
-            "key": "枫叶影视",
-            "name": "枫叶影视",
-            "type": 3,
-            "api": "./py/合集.py",
+            "api": "./py/奇优.py",
             "searchable": 1,
             "quickSearch": 1,
-            "filterable": 1,
-            "style": {
-                "type": "card",
-                "ratio": 0.7
-            },
-            "extend": {
-                "spider": "枫叶"
-            }
-        },
-        {
-            "key": "爱奇影视",
-            "name": "爱奇影视",
-            "type": 3,
-            "api": "./py/合集.py",
-            "searchable": 1,
-            "quickSearch": 1,
-            "filterable": 1,
-            "style": {
-                "type": "card",
-                "ratio": 0.7
-            },
-            "extend": {
-                "spider": "爱奇"
-            }
+            "filterable": 1
         },
         {
             "key": "腾讯影视",
             "name": "腾讯影视",
             "type": 3,
-            "api": "./py/合集.py",
-            "searchable": 1,
-            "quickSearch": 1,
-            "filterable": 1,
             "style": {
                 "type": "card",
                 "ratio": 0.7
             },
-            "extend": {
-                "spider": "腾讯"
-            }
+            "api": "./py/腾讯.py",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1
+        },
+        {
+            "key": "爱奇影视",
+            "name": "爱奇影视",
+            "type": 3,
+            "style": {
+                "type": "card",
+                "ratio": 0.7
+            },
+            "api": "./py/爱奇.py",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1
+        },
+        {
+            "key": "4K影视",
+            "name": "4K影视",
+            "type": 3,
+            "style": {
+                "type": "card",
+                "ratio": 0.7
+            },
+            "api": "./py/4K.py",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1
+        },
+        {
+            "key": "枫叶影视",
+            "name": "枫叶影视",
+            "type": 3,
+            "style": {
+                "type": "card",
+                "ratio": 0.7
+            },
+            "api": "./py/枫叶.py",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1
+        },
+        {
+            "key": "追光影视",
+            "name": "追光影视",
+            "type": 3,
+            "style": {
+                "type": "card",
+                "ratio": 0.7
+            },
+            "api": "./py/追光.py",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1
+        },
+        {
+            "key": "七猫影视",
+            "name": "七猫影视",
+            "type": 3,
+            "style": {
+                "type": "card",
+                "ratio": 0.7
+            },
+            "api": "./py/七猫.py",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1
+        },
+        {
+            "key": "毒舌影视",
+            "name": "毒舌影视",
+            "type": 3,
+            "style": {
+                "type": "card",
+                "ratio": 0.7
+            },
+            "api": "./py/毒舌.py",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1
         }
     ]
 }
