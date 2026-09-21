@@ -12,6 +12,11 @@
 //   3. 最快命中：按各源历史耗时学习排序，命中即返回，不傻等全源扫完
 //   4. 白名单强制：SCAN_SOURCES 里不在 SCAN_BINDING 表内的条目不执行
 //   5. 全请求 6s 超时 + try/catch 空值保护
+//   8. v8: 豆瓣挂掉自愈 —— 连续3次失败后5分钟内跳过豆瓣全部请求
+//      （搜索直奔源站直搜、封面不再逐条白等超时），首页自动降级到源站热榜
+//   6. v4：白名单扩到 7 源（视觉/毒舌/追光/七猫/八天/多瑙/爱壹帆），
+//      m3u8 验证 3.5s 超时 + URL 级缓存，历史 100% 命中的源跳过握手验证；
+//      多瑙一次 API 返回多条线路，爱壹帆/八天为标准 player_aaaa 结构
 //
 // 内容合规：配套 py 源已经过审核，成人/18+ 站点及分类已全部剔除
 // ============================================================
@@ -34,7 +39,7 @@ SPIDER.headers = {
 function _req(url) {
   try {
     if (typeof req === 'function') {
-      var r = req(url, { headers: SPIDER.headers, timeout: 6000 });
+      var r = req(url, { headers: SPIDER.headers, timeout: 4500 });
       return (r && r.content) ? r.content : '';
     }
     if (typeof fetch === 'function') {
@@ -101,8 +106,9 @@ function _mapItem(it) {
 function _mergeCollections(cols, page) {
   var seen = {};
   var arr = [];
+  var start = (page > 1 ? page - 1 : 0) * 50;
   for (var c = 0; c < cols.length; c++) {
-    var d = _getJSON(cols[c]);
+    var d = _getJSON(cols[c].replace(/start=\d+/, 'start=' + start));
     if (d && d.subject_collection_items) {
       for (var i = 0; i < d.subject_collection_items.length; i++) {
         var it = d.subject_collection_items[i];
@@ -296,14 +302,48 @@ function _home(filter) {
   return JSON.stringify(out);
 }
 
+function _homeVodFallback() {
+  var arr = [];
+  var seen = {};
+  var order = _srcOrder().slice(0, 5);
+  for (var oi = 0; oi < order.length && arr.length < 20; oi++) {
+    var src = SCAN_SOURCES[order[oi]];
+    if (!SCAN_BINDING.hasOwnProperty(src.name)) continue;
+    if (!src.listRe && !src.homeRe) continue;
+    var lre = src.homeRe || src.listRe;
+    try {
+      var homeUrl = src.home || (String(src.search).split('?')[0].replace(/[^\/]*$/, ''));
+      var html = _req(homeUrl);
+      if (!html || html.length < 400) continue;
+      lre.lastIndex = 0;
+      var m2, c2 = 0;
+      while ((m2 = lre.exec(html)) !== null && c2 < 8) {
+        c2++;
+        var t = _cleanTitle(m2[src.listTitleGroup || 2]).replace(/^立刻播放/, '');
+        if (!t || seen[t]) continue;
+        seen[t] = 1;
+        arr.push({ vod_id: src.name + '|' + m2[1], vod_name: t, vod_pic: '', vod_remarks: '直搜·' + src.name });
+      }
+    } catch (e) {}
+  }
+  return arr;
+}
+
 function _homeVod() {
   var d = _getJSON('https://m.douban.com/rexxar/api/v2/subject_collection/subject_real_time_hotest/items?start=0&count=50&updated_at=&items_only=1&for_mobile=1');
+  if (!d) _dbFail();
   var arr = [];
   if (d && d.subject_collection_items) {
+    _DB_STATE.fails = 0;
     for (var i = 0; i < d.subject_collection_items.length; i++) {
       var m = _mapItem(d.subject_collection_items[i]);
       if (m) arr.push(m);
     }
+  }
+  // v8: 豆瓣挂着 → 源站首页兜底（界面不再空白）
+  if (arr.length === 0 && _doubanDown()) {
+    var fb = _homeVodFallback();
+    if (fb.length) return JSON.stringify({ list: fb });
   }
   return JSON.stringify({ list: arr });
 }
@@ -389,10 +429,23 @@ function _cleanTitle(s) {
   return String(s || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
 }
 
+var _DOUBAN_CACHE = {};
+// v8: 豆瓣可达性状态机 —— 连续3次网络级失败后，5分钟内跳过一切豆瓣请求
+// （豆瓣接口挂着时，每个兜底封面查询都要白等 4.5s 超时，整包卡死的元凶）
+var _DB_STATE = { fails: 0, downUntil: 0 };
+function _doubanDown() { return Date.now() < _DB_STATE.downUntil || _DB_STATE.fails >= 3; }
+function _dbFail() { _DB_STATE.fails++; if (_DB_STATE.fails >= 3) _DB_STATE.downUntil = Date.now() + 300000; }
+function _dbGood() { _DB_STATE.fails = 0; }
+
 function _doubanSearch(q) {
   var out = [];
+  var ck = 'ds:' + q;
+  if (_DOUBAN_CACHE[ck] !== undefined) {
+    try { return JSON.parse(_DOUBAN_CACHE[ck]); } catch (e0) { return []; }
+  }
   try {
     var d = _getJSON('https://m.douban.com/rexxar/api/v2/search?q=' + encodeURIComponent(q));
+    if (!d) { _dbFail(); _DB_STATE.downUntil = Date.now() + 60000; }
     if (d && d.subjects && d.subjects.items && d.subjects.items.length > 0) {
       for (var i = 0; i < d.subjects.items.length; i++) {
         var t = d.subjects.items[i].target;
@@ -403,11 +456,39 @@ function _doubanSearch(q) {
       }
     }
   } catch (e) {}
+  if (out.length > 0) {
+    try { _DOUBAN_CACHE[ck] = JSON.stringify(out); } catch (e1) {}
+  }
   return out;
 }
 
 // 源站直搜：逐源搜关键词，收集带标题的条目
 // vod_id 格式 '源名|标识'：通用源=播放页路径，fetchLine源=标题
+// 2026-09-20 v7: 直搜结果封面兜底——查豆瓣同名片拿 poster（缓存按片名）
+var _DOUBAN_PIC_CACHE = {};
+function _doubanPicOf(title) {
+  if (!title) return '';
+  if (_doubanDown()) return '';   // v8: 豆瓣挂着时不再逐条白等超时
+  if (_DB_STATE.fails >= 2) return '';
+  var ck = 'p:' + title;
+  if (_DOUBAN_PIC_CACHE[ck] !== undefined) return _DOUBAN_PIC_CACHE[ck];
+  var pic = '';
+  try {
+    var d = _getJSON('https://m.douban.com/rexxar/api/v2/search?q=' + encodeURIComponent(title));
+    if (d && d.subjects && d.subjects.items && d.subjects.items.length > 0) {
+      for (var i = 0; i < d.subjects.items.length; i++) {
+        var t = d.subjects.items[i].target;
+        if (!t || !t.id || !t.title) continue;
+        if (_sim(t.title, title)) {
+          if (t.cover_url) { _DOUBAN_PIC_CACHE[ck] = t.cover_url; return t.cover_url; }
+        }
+      }
+    }
+  } catch (e) {}
+  _DOUBAN_PIC_CACHE[ck] = '';
+  return '';
+}
+
 function _collectionSearch(wd) {
   var arr = [];
   var seen = {};
@@ -415,9 +496,11 @@ function _collectionSearch(wd) {
     title = _cleanTitle(title).replace(/^立刻播放/, '');
     if (!ident || !title || seen[title]) return;
     seen[title] = 1;
+    // 2026-09-20 v7 封面兜底：源站没抓到海报 → 豆瓣同名片封面（缓存查询）
+    if (!pic) pic = _doubanPicOf(title);
     arr.push({ vod_id: name + '|' + ident, vod_name: title, vod_pic: pic || '', vod_remarks: '直搜·' + name });
   }
-  var order = _srcOrder();
+  var order = _srcOrder().slice(0, 4);
   for (var oi = 0; oi < order.length && arr.length < 12; oi++) {
     var src = SCAN_SOURCES[order[oi]];
     if (!SCAN_BINDING.hasOwnProperty(src.name)) continue;
@@ -425,16 +508,16 @@ function _collectionSearch(wd) {
       var sh = _req(src.search.replace('{q}', encodeURIComponent(wd)));
       if (!sh || sh.length < 400) continue;
       if (typeof src.fetchLine === 'function') {
-        // 追光：voddetail 链接 + title 属性
-        var re = /<a[^>]+href="\/voddetail\/(\d+)\.html"[^>]*title="([^"]*)"/g;
+        // 追光：voddetail 链接 + 邻近 title（锚点本身不带 title 属性，2026-09 实测）
+        var re = /<a[^>]+href="\/voddetail\/(\d+)\.html"([\s\S]{0,900}?[\s](?:title|alt)="([^"]*)")?/g;
         var m, n = 0;
         while ((m = re.exec(sh)) !== null && n < 8) {
           n++;
           if (src.name === '七猫短剧') {
             var tm = /MTagBookList_bookName[^>]*>([^<]+)<\/a>/.exec(sh.substr(m.index, 800));
             if (tm) push(src.name, tm[1], tm[1]);
-          } else {
-            push(src.name, m[2], m[2]);
+          } else if (m[3]) {
+            push(src.name, m[1] + '.html', m[3]);
           }
         }
         continue;
@@ -444,7 +527,14 @@ function _collectionSearch(wd) {
       var m2, c = 0;
       while ((m2 = src.listRe.exec(sh)) !== null && c < 8) {
         c++;
-        push(src.name, m2[1], m2[src.listTitleGroup || 2]);
+        // 2026-09-20 封面：条目锚点前后窗口内的 poster img（逐条对齐）
+        var pic = '';
+        if (src.picRe) {
+          var win = sh.slice(Math.max(0, m2.index - 900), m2.index + 900);
+          var pm = src.picRe.exec(win);
+          if (pm && pm[1]) pic = (src.picBase || '') + pm[1];
+        }
+        push(src.name, m2[1], m2[src.listTitleGroup || 2], pic);
       }
     } catch (e) {}
   }
@@ -464,10 +554,10 @@ function _search(wd, quick, pg) {
               .replace(/(HD|全集|高清|在线观看|完整版|视频|剧情片|电视剧|第\d+集|预告|抢先看|国语|中字)/g, '')
               .replace(/\s+/g, '').trim();
   if (!wd2 && wdBk) wd2 = wdBk;
-  // 1. 豆瓣（原词 → 书名号片名 → 裸词）
-  var arr = _doubanSearch(wd);
-  if (arr.length === 0 && wdBk && wdBk !== wd) arr = _doubanSearch(wdBk);
-  if (arr.length === 0 && wd2 && wd2 !== wd) arr = _doubanSearch(wd2);
+  // 1. 豆瓣（原词 → 书名号片名 → 裸词）—— v8: 豆瓣挂着时全部跳过
+  var arr = _doubanDown() ? [] : _doubanSearch(wd);
+  if (arr.length === 0 && !_doubanDown() && wdBk && wdBk !== wd) arr = _doubanSearch(wdBk);
+  if (arr.length === 0 && !_doubanDown() && wd2 && wd2 !== wd) arr = _doubanSearch(wd2);
   // 2. 豆瓣全空 → 源站直搜（书名号片名 → 原词 → 裸词）
   if (arr.length === 0) {
     var tries = [];
@@ -500,8 +590,28 @@ function _detailSource(id) {
     if (typeof src.fetchLine === 'function') {
       var line = src.fetchLine(sid);
       if (line && line.url) m3u8 = line.url;
+    } else if (src.epsPage && src.epPlay && src.epsRe) {
+      // v7 效率优先：直接从详情页取剧集列表，第1集即 m3u8 —— 少 1 次播放页请求
+      var epsList0 = _episodes(src, sid);
+      if (epsList0.length > 0) {
+        var firstEp = epsList0[0];
+        var firstUrl = src.epPlay(firstEp.path);
+        var ph0 = _req(firstUrl) || '';
+        if (ph0.length > 400) {
+          src.m3u8Re.lastIndex = 0;
+          var mm0 = src.m3u8Re.exec(ph0);
+          if (mm0 && mm0[1]) m3u8 = mm0[1].replace(/\\\//g, '/');
+        }
+      }
     } else {
-      var pageUrl = src.play(sid);
+      var sid2 = String(sid);
+      var pageUrl = src.play(sid2);
+      if (sid2.indexOf('voddetail') > -1 && src.home) {
+        // 首页兜底条目：标识是详情页路径 → 先抓详情找首个播放页
+        var dhtml = _req(src.home + sid2.replace(/^\//, '')) || '';
+        var pm2 = /href="\/vodplay\/\d+-\d+-\d+\.html"/.exec(dhtml);
+        if (pm2) pageUrl = src.home + pm2[0].replace('href="', '').replace('"', '');
+      }
       var ph = _req(pageUrl);
       if (ph && ph.length > 400) {
         src.m3u8Re.lastIndex = 0;
@@ -514,6 +624,26 @@ function _detailSource(id) {
     // 直搜详情同样要验证 CDN——否则死 CDN 的线路会送到播放器无限转圈
     if (m3u8 && !_verifyM3u8(m3u8)) m3u8 = '';
   } catch (e) {}
+    // 2026-09-20 v7 铁律：首次命中立即返回。所有集数走 EP:: lazy，
+    // 首集 m3u8 已在上面抓过 —— detail() 秒回，播放时才解析其他集
+    if (src && src.epsPage && src.epPlay) {
+      var epsList = _episodes(src, sid);
+      if (epsList.length > 1) {
+        var eUrls = [];
+        for (var ek = 0; ek < epsList.length; ek++) {
+          var e = epsList[ek];
+          // 首集 = 已抓到的 m3u8；其余 EP:: 播放时解析（0 额外请求）
+          if (ek === 0 && m3u8) eUrls.push(e.ep + '$' + m3u8);
+          else eUrls.push(e.ep + '$EP::' + sname + '::' + e.path);
+        }
+        if (eUrls.length) {
+          vod.vod_play_from = sname;
+          vod.vod_play_url = eUrls.join('#');
+          vod.vod_remarks = '直搜·' + sname;
+          return JSON.stringify({ list: [vod] });
+        }
+      }
+    }
   if (m3u8) {
     vod.vod_play_from = sname;
     vod.vod_play_url = '正片$' + m3u8;
@@ -532,8 +662,19 @@ function _detail(id) {
   var vod = { vod_id: vid, vod_name: '', vod_pic: '', vod_actor: '', vod_director: '', vod_area: '', vod_year: '', vod_remarks: '', vod_content: '', vod_play_from: '', vod_play_url: '' };
   try {
     if (!vid) return JSON.stringify({ list: [] });
-    var d = _getJSON('https://m.douban.com/rexxar/api/v2/movie/' + vid);
-    if (!d || !d.title) d = _getJSON('https://m.douban.com/rexxar/api/v2/tv/' + vid);
+    // 2026-09-20 v7: 豆瓣详情缓存（同一 vid 二次进入秒出）
+    var dCache = _DOUBAN_CACHE['dv:' + vid];
+    var d = null;
+    if (dCache !== undefined) {
+      try { d = JSON.parse(dCache); } catch (e0) { d = null; }
+    }
+    if (!d) {
+      d = _getJSON('https://m.douban.com/rexxar/api/v2/movie/' + vid);
+      if (!d || !d.title) d = _getJSON('https://m.douban.com/rexxar/api/v2/tv/' + vid);
+      if (d && d.title) {
+        try { _DOUBAN_CACHE['dv:' + vid] = JSON.stringify(d); } catch (e1) {}
+      }
+    }
     if (!d || !d.title) return JSON.stringify({ list: [vod] });
 
     var title = d.title || '';
@@ -569,12 +710,47 @@ function _detail(id) {
     // 自动扫描：按片名扫订阅内其他源，把有播放页的源聚合为线路
     try {
       var lines = _scanTitle(title);
+        // 2026-09 加固七：整词扫描失败时用“去季数/去空格”的变体重扫——
+        // 源站常收录的是不带季数的基础片名（如“剑来”而非“剑来 第三季”）
+        if ((!lines || lines.length === 0) && title) {
+          var t2 = String(title).replace(/第[一二三四五六七八九十\d]+[季部]/g, '').replace(/\s+/g, '').trim();
+          if (t2 && t2 !== title) lines = _scanTitle(t2);
+        }
       if (lines && lines.length > 0) {
         var froms = [];
         var urls = [];
         for (var k = 0; k < lines.length; k++) {
-          froms.push(lines[k].name);
-          urls.push('正片$' + lines[k].url);
+          var ln = lines[k];
+          var src = null;
+          for (var si = 0; si < SCAN_SOURCES.length; si++) {
+            if (SCAN_SOURCES[si].name === ln.name) { src = SCAN_SOURCES[si]; break; }
+          }
+          // 2026-09-20 封面兜底：豆瓣封面挂了 → 用源站搜索页拿到的海报
+          if (!vod.vod_pic && ln.pic) vod.vod_pic = ln.pic;
+          // 2026-09-20 修复"永远只有正片"：当源支持集数枚举并命中 >1 时按集输出
+          if (src && src.epsPage && src.epPlay && ln.ident) {
+            var epsList = _episodes(src, ln.ident);
+            if (epsList.length > 1) {
+              var eUrls = [];
+              for (var ei = 0; ei < epsList.length; ei++) {
+                var e = epsList[ei];
+                var pu = '';
+                if (ei === 0 && ln.url) {
+                  // 首集复用 _scanTitle 已缓存的真实 m3u8 —— 秒出
+                  pu = ln.url;
+                } else {
+                  // v7 铁律：detail 页面只给 EP:: lazy 占位，不预抓。
+                  // 每集播放时 _play 按需解析——详情页 0 额外请求
+                  eUrls.push(e.ep + '$EP::' + ln.name + '::' + e.path);
+                  continue;
+                }
+                if (pu) eUrls.push(e.ep + '$' + pu);
+              }
+              if (eUrls.length) { froms.push(ln.name); urls.push(eUrls.join('#')); continue; }
+            }
+          }
+          froms.push(ln.name);
+          urls.push('正片$' + ln.url);
         }
         vod.vod_play_from = froms.join('$$$');
         vod.vod_play_url = urls.join('$$$');
@@ -604,31 +780,53 @@ var SCAN_BINDING = {
   '视觉影院': '视觉',
   '毒舌影视': '毒舌',
   '追光影视': '追光',
-  '七猫短剧': '七猫'
+  '七猫短剧': '七猫',
+  '八天电影': '八天电影',
+  '多瑙影院': '多瑙影院',
+  '爱壹帆影视': '爱壹帆'
 };
 
 var SCAN_SOURCES = [
   {
     name: '视觉影院',
     search: 'https://www.sypfjy.com/vodsearch.html?wd={q}',
+    home: 'https://www.sypfjy.com/',
+    homeRe: /href="(\/voddetail\/\d+\.html)"[\s\S]{0,600}?alt="([^"]{1,40})"/g,
     re: /href="(\/vodplay\/\d+-1-1\.html)"[^>]*title="([^"]*)"/g,
     titleGroup: 2,
     play: function (p) { return 'https://www.sypfjy.com' + p; },
     m3u8Re: /"url":"(https?:\\?\/\\?\/[^"]+?\.m3u8[^"]*)"/g,
     // 源站直搜用：搜索页逐条收集（id组1=播放页路径, 组2=标题）
     listRe: /href="(\/vodplay\/\d+-1-1\.html)"[^>]*title="([^"]*)"/g,
-    listTitleGroup: 2
-  },
+    listTitleGroup: 2,
+    epsPage: function (ident) {
+      var dd = /vodplay\/(\d+)-/.exec(String(ident));
+      return dd ? 'https://www.sypfjy.com/voddetail/' + dd[1] + '.html' : null;
+    },
+      epsRe: /href="(\/vodplay\/\d+-\d+-\d+\.html)"[^>]*title="([^"]{1,40})"/g,
+      epPlay: function (path) { return 'https://www.sypfjy.com' + path; },
+      // 2026-09-20 搜索结果封面：搜索页条目里的 poster img
+      picRe: /data-src="(https?:[^"\s]+\.(?:jpg|png|webp))"/,
+      picBase: ''
+    },
   {
     name: '毒舌影视',
     search: 'https://m.xnhrsb.com/dsshiyisc/{q}----------1---.html',
+    home: 'https://m.xnhrsb.com/',
     re: /href="\/dsshiyidt\/(\d+)\.html"/g,
     titleGroup: 0,
     play: function (id) { return 'https://m.xnhrsb.com/dsshiyipy/' + id + '-1-1.html'; },
     m3u8Re: /"url":"(https?:\\?\/\\?\/[^"]+?\.m3u8[^"]*)"/g,
     // 源站直搜用：dsshiyidt 链接 + 后方 alt="标题"
     listRe: /href="\/dsshiyidt\/(\d+)\.html"[\s\S]{0,300}?alt="([^"]*)"/g,
-    listTitleGroup: 2
+    epsPage: function (ident) {
+      var dd = /(\d+)/.exec(String(ident));
+      return dd ? 'https://m.xnhrsb.com/dsshiyidt/' + dd[1] + '.html' : null;
+    },
+    epsRe: /href="(\/dsshiyipy\/\d+-\d+-\d+\.html)"[^>]*>([^<]{1,16})</g,
+    epPlay: function (path) { return 'https://m.xnhrsb.com' + path; },
+    picRe: /data-original="([^"\s]+\.(?:jpg|png|webp))"/,
+    picBase: 'https://m.xnhrsb.com'
   },
   // ---------- 实验性：自定义多步取线 ----------
   // fetchLine(title) 返回 {name,url} 或 null，走通用三步之外的多跳逻辑。
@@ -643,9 +841,12 @@ var SCAN_SOURCES = [
         // 1. 搜索 → 取标题匹配的详情页 id（无匹配则取第一条）
         var sh = _req(HOST + '/vodsearch/' + encodeURIComponent(title) + '-------------.html');
         if (!sh || sh.length < 400) return null;
-        var re = /<a[^>]+href="\/voddetail\/(\d+)\.html"[^>]*title="([^"]*)"/g;
-        var m = _matchItem(sh, re, 2, title);
-        if (!m) { re.lastIndex = 0; m = /<a[^>]+href="\/voddetail\/(\d+)\.html"/.exec(sh); }
+        // 实测（2026-09）：页面 voddetail 锚点本身不带 title 属性，标题在
+        // 后续兄弟节点里 —— 先试宽松表达式（链接后 800 字节内找 title=），
+        // 不命中再退回第一条链接
+        var re1 = /<a[^>]+href="\/voddetail\/(\d+)\.html"([\s\S]{0,900}?[\s](?:title|alt)="([^"]*)")?/g;
+        var m = _matchItem(sh, re1, 3, title);
+        if (!m) { re1.lastIndex = 0; m = /<a[^>]+href="\/voddetail\/(\d+)\.html"/.exec(sh); }
         if (!m) return null;
         var vid = m[1];
         // 2. 详情页 → 收集播放页路径（最多试 3 条线路，每线路取第1集）
@@ -712,7 +913,102 @@ var SCAN_SOURCES = [
         return null;
       } catch (e) { return null; }
     }
-  }
+  },
+    // ---------- 2026-09-20 新增（实测全链路通过）----------
+    // 八天电影 (dy.8ttv.cn)：三步=搜索→详情→播放页（player_aaaa.url）
+    {
+      name: '八天电影',
+      search: 'https://dy.8ttv.cn/index.php/vod/search/wd/{q}.html',
+      home: 'https://dy.8ttv.cn/',
+      re: /href="(\/index\.php\/vod\/detail\/id\/\d+\.html)"/g,
+      titleGroup: 0,
+      play: function (p) {
+        var u = String(p);
+        if (u.indexOf('/index.php/vod/play/') === 0) return 'https://dy.8ttv.cn' + u;  // 已是播放路径
+        return 'https://dy.8ttv.cn/index.php/vod/play/id/' + u + '/sid/1/nid/1.html';
+      },
+      m3u8Re: /player_aaaa\s*=\s*\{[\s\S]{0,2500}?"url"\s*:\s*"([^"]+\.m3u8[^"]*)"/,
+      listRe: /href="\/index\.php\/vod\/detail\/id\/(\d+)\.html"[\s\S]{0,900}?[\s](?:title|alt)="([^"]{1,40})"/g,
+      listTitleGroup: 2,
+      epsPage: function (ident) {
+        var dd = /detail\/id\/(\d+)\.html/.exec(String(ident));
+        return dd ? 'https://dy.8ttv.cn/index.php/vod/detail/id/' + dd[1] + '.html' : null;
+      },
+      epsRe: /href="(\/index\.php\/vod\/play\/id\/\d+\/sid\/\d+\/nid\/\d+\.html)"[^>]*title="([^"]{1,40})"/g,
+      epPlay: function (path) { return 'https://dy.8ttv.cn' + path; },
+      picRe: /data-original="(https?:[^"\s]+\.(?:jpg|png|webp))"/,
+      picBase: ''
+    },
+    // 多瑙影院 (dnvod.org)：/search?wd= → /anime|doc|.../detail/{id} →
+    // /vod_plays/{id}/{ep} 返回 JSON 数组含多条 m3u8（一次请求多条线路）
+    {
+      name: '多瑙影院',
+      fetchLine: function (title) {
+        try {
+          var HOST = 'https://dnvod.org';
+          var sh = _req(HOST + '/search?q=' + encodeURIComponent(title));
+          if (!sh || sh.length < 400) return null;
+          var re = /href="\/(anime|doc|movie|show|tv)\/detail\/(\d+)"/g;
+          // 2026-09-20 升级：search 页是"detail 链接 → 窗口(1800字) → 标题div"结构。
+          // 逐条扫描所有 detail 链接，在窗口里找标题；sim 匹配即取该 id。
+          var reTitle = /<div[^>]+class=["'][^"']*text-left\s+text-truncate\s+text-dark[^"']*["'][^>]*>([\s\S]{1,60}?)<\/div>/g;
+          var matches = [];
+          var tmp = null;
+          re.lastIndex = 0;
+          while ((tmp = re.exec(sh)) !== null) {
+            matches.push({ id: tmp[2], cat: tmp[1], idx: tmp.index });
+          }
+          var vid = null, cat = null, hitTitle = null;
+          for (var mi = 0; mi < matches.length; mi++) {
+            var win = sh.slice(matches[mi].idx, matches[mi].idx + 1800);
+            var tw = null;
+            reTitle.lastIndex = 0;
+            while ((tw = reTitle.exec(win)) !== null) {
+              var tn = tw[1].replace(/<[^>]*>/g, '').trim();
+              if (_sim(tn, title)) { vid = matches[mi].id; cat = matches[mi].cat; hitTitle = tn; break; }
+            }
+            if (vid) break;
+          }
+          if (!vid) { re.lastIndex = 0; var first = re.exec(sh); if (first) { vid = first[2]; cat = first[1]; } }
+          if (!vid) return null;
+          var m = [null, null, vid];
+          // 2026-09-20: 需要 ep 标记 —— 详情页 /play/{vid}-epXXX（电视）或 -m（电影）。
+          var dhDetail = _req(HOST + '/' + cat + '/detail/' + vid) || '';
+          var ep = null;
+          var pm = /href="\/play\/\d+-([\w]+)"/.exec(dhDetail);
+          if (pm) ep = pm[1];
+          if (!ep) ep = 'm';
+          var dh = _req(HOST + '/vod_plays/' + vid + '/' + ep);
+          if (!dh || dh.length < 100) return null;
+          var jd = JSON.parse(dh);
+          var plays = jd.video_plays || [];
+          for (var i = 0; i < plays.length; i++) {
+            var u = String(plays[i].play_data || '');
+            if (u.indexOf('.m3u8') > -1 || u.indexOf('.mp4') > -1) {
+              return { name: this.name, url: u.replace(/\\\//g, '/') };
+            }
+          }
+          return null;
+        } catch (e) { return null; }
+      }
+    },
+    // 爱壹帆 (iyf.lv)：iyfplay 页面标准 player_aaaa.url（m3u8 明文）
+    {
+      name: '爱壹帆影视',
+      search: 'https://www.iyf.lv/s/{q}-------------.html',
+      home: 'https://www.iyf.lv/',
+      play: function (idRaw) { return 'https://www.iyf.lv/iyfplay/' + idRaw + '/'; },
+      m3u8Re: /player_aaaa\s*=\s*\{[\s\S]{0,2500}?"url"\s*:\s*"([^"]+\.m3u8[^"]*)"/,
+      listRe: /href="\/iyfplay\/(\d+-1-1)\/"[\s\S]{0,1200}?alt="([^"]{1,40})"/g,
+      epsPage: function (ident) {
+        var ai = /(\d+)-1-1/.exec(String(ident));
+        return ai ? 'https://www.iyf.lv/iyftv/' + ai[1] + '/' : null;
+      },
+      epsRe: /href="(\/iyfplay\/\d+-\d+-\d+)\/"[^>]*title="([^"]{1,40})"/g,
+      epPlay: function (path) { return 'https://www.iyf.lv' + path + '/'; },
+      picRe: /data-original="([^"\s]+\.(?:jpg|png|webp))"/,
+      picBase: 'https://www.iyf.lv'
+    }
 ];
 
 // 标题相似度：去掉空白后互相包含即视为匹配
@@ -746,27 +1042,160 @@ var _SCAN_CACHE = {};
 // （JS 引擎是同步单线程，做不到真并发——靠"学习排序+命中即停"达到同样效果）
 var _SRC_STATS = {};
 
+// 2026-09-20 v7 铁律："谁最快就用谁"——按 历史命中优先 + 平均耗时升序
+// 打分: score = (ok===0 ? 9999 : ms/n) ; 未测过的排最前
 function _srcOrder() {
   var idx = [];
   for (var i = 0; i < SCAN_SOURCES.length; i++) idx.push(i);
   idx.sort(function (a, b) {
-    var sa = _SRC_STATS[SCAN_SOURCES[a].name] || { n: 0, ms: 0, ok: 0 };
-    var sb = _SRC_STATS[SCAN_SOURCES[b].name] || { n: 0, ms: 0, ok: 0 };
-    // 平均耗时升序；从未测过的源排最前（未知源优先给它机会）
-    var va = sa.n ? sa.ms / sa.n : 0;
-    var vb = sb.n ? sb.ms / sb.n : 0;
+    function score(nm) {
+      var st = _SRC_STATS[nm];
+      if (!st || st.n === 0) return -1;         // 未测过的最先试
+      if (st.ok === 0) return 99999;            // 试过全失败的垫底
+      return st.ms / st.n;                      // 平均耗时
+    }
+    var va = score(SCAN_SOURCES[a].name);
+    var vb = score(SCAN_SOURCES[b].name);
     return va - vb;
   });
   return idx;
 }
 
-// 直链可达性验证：轻量拉一次 m3u8，死 CDN 当场淘汰
-// （实测 yddsha2/qrssv 这类半死 CDN：ConnectException / TLS 握手被掐）
+// 直链可达性验证
+// 2026-09-20 加速：原实现读整个 m3u8 + 默认 6s 超时，慢 CDN（如 maowushi
+// 首包 6s）白拖 6 秒。改为 3.5 秒超时轻量请求；并把结果按 URL 缓存，
+// 同一直链复查秒回。
+var _verifyCache = {};
+var _EP_CACHE = {};      // src.name|ident → [{ep, path}]
+var _EP_M3U8_CACHE = {};  // src.name|ident|ep → m3u8 URL
+// 2026-09-20 v7：真值永久缓存；失败记录时间戳，60 秒后允许重试。
+// （原永久 false 缓存导致 CDN 恢复后也拿不到线路——"时好时坏"主因）
+var _VERIFY_TTL = 60000;
 function _verifyM3u8(u) {
+  if (!u) return false;
+  var rec = _verifyCache[u];
+  if (rec !== undefined) {
+    if (rec === true) return true;
+    if (Date.now() - rec < _VERIFY_TTL) return false;  // 失败缓存 60s 内直接跳过
+  }
+  var ok = false;
   try {
-    var vh = _req(u);
-    return vh && vh.length > 30 && vh.indexOf('#EXTM3U') > -1;
-  } catch (e) { return false; }
+    if (typeof req === 'function') {
+      var vh = req(u, { headers: SPIDER.headers, timeout: 3500 });
+      var c = (vh && vh.content) ? vh.content : '';
+      ok = !!(c && c.length > 30 && c.indexOf('#EXTM3U') > -1);
+    } else {
+      var vh2 = _req(u);
+      ok = !!(vh2 && vh2.length > 30 && vh2.indexOf('#EXTM3U') > -1);
+    }
+  } catch (e) { ok = false; }
+  _verifyCache[u] = ok ? true : Date.now();
+  return ok;
+}
+
+// 各线路域名的防盗链请求头（播放器需要带上才能过 CDN 防盗链）
+var _PLAY_HEADERS = {};
+function _playHeadersFor(u) {
+  try {
+    var m = /^https?:\/\/([^\/]+)/.exec(String(u || ''));
+    if (!m) return '';
+    var host = m[1];
+    // 已知需要 Referer 的 CDN：iappcht／baidu／bilibili 等按需追加
+    var refRules = [
+      { match: 'yuglf.com', ref: 'https://www.sypfjy.com/' },
+      { match: 'hkzy.vip', ref: 'https://m.xnhrsb.com/' },
+      { match: 'zgtv.online', ref: 'https://top3.zgtv.online/' },
+      { match: 'qmao.net', ref: 'https://www.qmao.net/' }
+    ];
+    for (var i = 0; i < refRules.length; i++) {
+      if (host.indexOf(refRules[i].match) > -1) {
+        return JSON.stringify({ 'Referer': refRules[i].ref, 'User-Agent': SPIDER.UA });
+      }
+    }
+  } catch (e) {}
+  return '';
+}
+
+// ---------- 集数枚举（2026-09-20 修复：详情页原先永远只有"正片"一集） ----------
+// 每源可提供：
+//   epsPage(ident)  → 详情页 URL
+//   epsRe           → 匹配 (path, label) 的正则（label 在同锚点内或紧邻）
+//   epPath(path)    → 可直接传给 play() 的"播放路径"
+//
+// sid 归一化：同一 sid 只保留一条链（主线路），第一遇到视为主导线路。
+function _cleanEpLabel(raw) {
+  return String(raw || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+}
+
+// 2026-09-20 v7: 空结果 60s 重试——避免一次失败永久卡"正片"
+var _EP_TTL = 60000;
+function _episodes(src, ident) {
+  var ck = src.name + '|' + ident;
+  var rec = _EP_CACHE[ck];
+  if (rec !== undefined) {
+    if (rec.list.length > 1 || rec.list[0].ep !== '正片') return rec.list;  // 正式多集缓存
+    if (Date.now() - rec.t < _EP_TTL) return rec.list;                      // 刚失败过，跳过
+  }
+  var out = [];
+  try {
+    if (src.epsPage && src.epsRe) {
+      var dh = _req(src.epsPage(ident)) || '';
+      if (dh.length > 400) {
+        var re2 = src.epsRe;
+        re2.lastIndex = 0;
+        var tmp = null, firstSid = null, seenPath = {}, seenLbl = {};
+        while ((tmp = re2.exec(dh)) !== null) {
+          var path = tmp[1];
+          if (seenPath[path]) continue;
+          // 抽 sid: /play/id/{vid}/sid/{sid}/nid/{nid} 、 /play/{vid}-{sid}-{nid}.html
+          // /iyfplay/{vid}-{sid}-{nid}/  、 /dsshiyipy/{vid}-{sid}-{nid}.html
+          // 2026-09-20 按源分别解析 sid/nid：
+          // 八天: /play/id/{vid}/sid/{S}/nid/{E}.html  → S=线路, E=集
+          // 视觉: /vodplay/{vid}-{S}-{E}.html
+          // 毒舌: /dsshiyipy/{vid}-{S}-{E}.html
+          // 爱壹帆: /iyfplay/{vid}-{S}-{E}/
+          var sm = src.name === '八天电影'
+              ? /play\/id\/\d+\/sid\/(\d+)\/nid\/(\d+)/.exec(path)
+              : src.name === '视觉影院'
+              ? /vodplay\/\d+-(\d+)-(\d+)\.html/.exec(path)
+              : src.name === '毒舌影视'
+              ? /dsshiyipy\/\d+-(\d+)-(\d+)\.html/.exec(path)
+              : src.name === '爱壹帆影视'
+              ? /iyfplay\/\d+-(\d+)-(\d+)/.exec(path)
+              : null;
+          if (!sm) continue;
+          var sid = sm[1];       // 主线路
+          var nid = sm[2];       // 集号
+          // 2026-09-20 标签清洗：站点上剧集 title 多为"播放{片名}第XX集"，
+          // 统一提取"第XX集"做 label；为按钮锚点(无集数)时丢弃
+          var lbl = _cleanEpLabel(tmp[2]).replace(/^立刻播放|^播放/g, '');
+          var lblNum = /第(\d+)集/.exec(lbl);
+          if (lblNum) {
+            var en = parseInt(lblNum[1], 10);
+            lbl = '第' + (en < 10 ? '0' + en : en) + '集';
+          } else if (out.length === 0) {
+            // 首集无集数标记——这是"全集/电影/按钮锚点"
+            lbl = '正片';
+          }
+          if (!lbl) continue;
+          if (seenLbl[lbl]) continue;
+          if (firstSid === null) firstSid = sid;
+          if (sid !== firstSid) continue;
+          seenLbl[lbl] = 1; seenPath[path] = 1;
+          // 弃掉无集数的"重复按钮锚点"（同一 path 出现『第002集』更多有意义）
+          out.push({ ep: lbl, path: path });
+        }
+      }
+    }
+  } catch (e) { out = []; }
+  if (!out.length) out = [{ ep: '正片', path: ident }];
+  _EP_CACHE[ck] = { list: out, t: Date.now() };
+  return out;
+}
+
+function _detailUrlFor(src, ident) {
+  try { if (src.epsPage) return src.epsPage(ident); } catch (e) {}
+  return null;
 }
 
 // 按片名扫描各源，返回 [{name, url}]（url 为 m3u8 直链）
@@ -777,7 +1206,9 @@ function _scanTitle(title) {
   if (_SCAN_CACHE[key]) return _SCAN_CACHE[key];
   var results = [];
   var hit = false;
-  var order = _srcOrder();
+  // 2026-09-20 效率优先：按历史命中率排序后只扫前 4 个源，
+  // 后面的源基本是慢/死域名，白拖用户等待。
+  var order = _srcOrder().slice(0, 4);
   for (var oi = 0; oi < order.length && !hit; oi++) {
     var i = order[oi];
     var src = SCAN_SOURCES[i];
@@ -789,7 +1220,7 @@ function _scanTitle(title) {
       // 自定义多步取线（追光/七猫等）优先
       if (typeof src.fetchLine === 'function') {
         var line = src.fetchLine(title);
-        if (line && line.url && _verifyM3u8(line.url)) {
+        if (line && line.url && (_trustedSource(src) || _verifyM3u8(line.url))) {
           results.push({ name: line.name || src.name, url: line.url });
           hit = true;
         }
@@ -809,8 +1240,11 @@ function _scanTitle(title) {
 // 2026-09 加固二：扫到直链后先验证 CDN 可达（发一次轻量请求），
 // 避免把死 CDN 的线路推给播放器无限转圈（实测 yddsha2/qrssv 这类半死 CDN）
       var real = mm[1].replace(/\\\//g, '/');
-      if (real && _verifyM3u8(real)) {
-        results.push({ name: src.name, url: real });
+      if (real && (_trustedSource(src) || _verifyM3u8(real))) {
+        var picM2 = null;
+        try { if (src.picRe) { var win2 = html.slice(Math.max(0, m.index - 900), m.index + 900); picM2 = src.picRe.exec(win2); } } catch (e9) {}
+        results.push({ name: src.name, url: real, ident: m[1],
+                       pic: picM2 && picM2[1] ? (src.picBase || '') + picM2[1] : '' });
         hit = true;
       }
     } catch (e) {
@@ -820,19 +1254,46 @@ function _scanTitle(title) {
       if (hit) st.ok++;
     }
   }
-  _SCAN_CACHE[key] = results;
+  // 2026-09 加固六：空结果不缓存——原实现把空结果永久缓存，一次抖动后该
+  // 片名直到重启都拿不到线路；站点/CDN 恢复后只需刷新详情即可复活
+  if (results.length > 0) _SCAN_CACHE[key] = results;
   return results;
 }
 
 // ---------- 播放：忠实原版（不内置任何第三方播放源） ----------
 
 function _play(flag, id, flags) {
+  var u = String(id || '');
+  // 2026-09-20: EP::线路名::路径 —— 长剧集 lazy 解析，播放时按需抓播放页提直链
+  if (u.indexOf('EP::') === 0) {
+    var p = u.split('::');
+    var srcName = p && p[1] ? p[1] : '';
+    var epPath = p && p.length > 2 ? p.slice(2).join('::') : '';
+    var resolved = '';
+    try {
+      var epSrc = null;
+      for (var si = 0; si < SCAN_SOURCES.length; si++) {
+        if (SCAN_SOURCES[si].name === srcName) { epSrc = SCAN_SOURCES[si]; break; }
+      }
+      if (epSrc && epSrc.epPlay && epPath) {
+        var ppUrl = epSrc.epPlay(epPath);
+        var ph = _req(ppUrl) || '';
+        if (ph.length > 400) {
+          epSrc.m3u8Re.lastIndex = 0;
+          var epMm = epSrc.m3u8Re.exec(ph);
+          if (epMm && epMm[1]) resolved = epMm[1].replace(/\\\//g, '/');
+        }
+      }
+    } catch (e0) { resolved = ''; }
+    u = resolved || '';
+  }
+  if (!u) u = '';
   return JSON.stringify({
     parse: '0',
     jx: '0',
-    headers: '',
+    header: _playHeadersFor(u),
     playUrl: '',
-    url: String(id || '')
+    url: u
   });
 }
 
